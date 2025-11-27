@@ -6,10 +6,12 @@
 #include "ccapi_cpp/ccapi_request.h"
 #include "ccapi_cpp/ccapi_event.h"
 #include "ccapi_cpp/ccapi_subscription.h"
+#include "ccapi_cpp/ccapi_ltp_websocket_adapter.h"
 #include <map>
 #include <string>
 #include <iostream>
 #include <chrono>
+#include <memory>
 
 namespace ltp {
 
@@ -47,10 +49,27 @@ class LTPTradingService {
   /**
    * 构造函数
    * @param session ccapi的Session对象指针
+   * @param useLTPAdapter 是否使用LTP适配器替代WebSocket（默认false）
+   * @param orderPubTopic LTP订单发布主题（仅在useLTPAdapter=true时使用）
+   * @param orderSubTopic LTP订单订阅主题（仅在useLTPAdapter=true时使用）
    */
-  explicit LTPTradingService(Session* session)
-    : session_(session), enableLatencyStats_(false) {
+  explicit LTPTradingService(Session* session,
+                             bool useLTPAdapter = false,
+                             const std::string& orderPubTopic = "bf0_order_sub",
+                             const std::string& orderSubTopic = "bf0_order_pub")
+    : session_(session),
+      enableLatencyStats_(false),
+      useLTPAdapter_(useLTPAdapter) {
     initializeDefaultCapabilities();
+
+    // 如果启用LTP适配器，初始化适配器
+    if (useLTPAdapter_) {
+      ltpAdapter_ = std::make_unique<ccapi::LTPWebSocketAdapter>(orderPubTopic, orderSubTopic);
+      if (ltpAdapter_->isInitialized()) {
+        // 启动接收线程
+        ltpAdapter_->startReceiving(&session_->getEventQueue());
+      }
+    }
   }
 
   /**
@@ -759,6 +778,8 @@ class LTPTradingService {
   std::map<std::string, std::string> websocketSubscriptionCorrelationIds_;  // 交易所 -> WebSocket订阅correlationId
   std::map<std::string, std::string> fixSubscriptionCorrelationIds_;        // 交易所 -> FIX订阅correlationId
   bool enableLatencyStats_;  // 是否启用延迟统计
+  bool useLTPAdapter_;  // 是否使用LTP适配器
+  std::unique_ptr<ccapi::LTPWebSocketAdapter> ltpAdapter_;  // LTP WebSocket适配器
 
   /**
    * FIX快速路径 - 零拷贝优化（最低延迟）
@@ -874,6 +895,25 @@ class LTPTradingService {
                                                const std::string& correlationId,
                                                const std::string& exchange,
                                                const std::chrono::steady_clock::time_point& apiCallStartTime) {
+    // 如果使用LTP适配器，直接通过适配器发送
+    if (useLTPAdapter_ && ltpAdapter_ && ltpAdapter_->isInitialized()) {
+      Request ccapiRequest = convertToCreateOrderRequest(request, credential);
+      if (!correlationId.empty()) {
+        ccapiRequest.setCorrelationId(correlationId);
+      }
+
+      // 记录延迟
+      if (enableLatencyStats_ && apiCallStartTime.time_since_epoch().count() > 0) {
+        auto sendTime = std::chrono::steady_clock::now();
+        auto latencyNs = std::chrono::duration_cast<std::chrono::nanoseconds>(sendTime - apiCallStartTime).count();
+        std::cout << "[LTPTradingService] createOrderAsync to LTP adapter latency: "
+                  << latencyNs << " ns (" << (latencyNs / 1000.0) << " us)" << std::endl;
+      }
+
+      ltpAdapter_->sendCreateOrder(ccapiRequest, credential);
+      return;
+    }
+
     // 获取WebSocket correlationId（已缓存，快速）
     auto wsIt = websocketSubscriptionCorrelationIds_.find(exchange);
     if (wsIt == websocketSubscriptionCorrelationIds_.end()) {
@@ -1055,6 +1095,25 @@ class LTPTradingService {
                                                const std::string& correlationId,
                                                const std::string& exchange,
                                                const std::chrono::steady_clock::time_point& apiCallStartTime) {
+    // 如果使用LTP适配器，直接通过适配器发送
+    if (useLTPAdapter_ && ltpAdapter_ && ltpAdapter_->isInitialized()) {
+      Request ccapiRequest = convertToCancelOrderRequest(request, credential);
+      if (!correlationId.empty()) {
+        ccapiRequest.setCorrelationId(correlationId);
+      }
+
+      // 记录延迟
+      if (enableLatencyStats_ && apiCallStartTime.time_since_epoch().count() > 0) {
+        auto sendTime = std::chrono::steady_clock::now();
+        auto latencyNs = std::chrono::duration_cast<std::chrono::nanoseconds>(sendTime - apiCallStartTime).count();
+        std::cout << "[LTPTradingService] cancelOrderAsync to LTP adapter latency: "
+                  << latencyNs << " ns (" << (latencyNs / 1000.0) << " us)" << std::endl;
+      }
+
+      ltpAdapter_->sendCancelOrder(ccapiRequest, credential);
+      return;
+    }
+
     // 获取WebSocket correlationId（已缓存，快速）
     auto wsIt = websocketSubscriptionCorrelationIds_.find(exchange);
     if (wsIt == websocketSubscriptionCorrelationIds_.end()) {
