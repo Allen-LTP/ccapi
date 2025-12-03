@@ -4,8 +4,8 @@
 #include <iostream>
 #include <chrono>
 
-using namespace ccapi;  // ccapi的基础类型：Session, EventHandler等
-using namespace ltp;    // LTP的交易接口类型
+using namespace ccapi;
+using namespace ltp;
 
 class ConnectivityTestHandler : public EventHandler {
  public:
@@ -272,7 +272,6 @@ class ConnectivityTestHandler : public EventHandler {
 };
 
 int main(int argc, char** argv) {
-  // 启用ccapi日志以查看实际发送的消息
   std::cout << "启用ccapi调试日志..." << std::endl;
 
   std::cout << "\n========================================" << std::endl;
@@ -281,7 +280,7 @@ int main(int argc, char** argv) {
 
   // 1. 创建Session（启用日志）
   SessionOptions sessionOptions;
-  sessionOptions.enableCheckPingPongWebsocketApplicationLevel = false;  // 减少日志噪音
+  sessionOptions.enableCheckPingPongWebsocketApplicationLevel = false;
   SessionConfigs sessionConfigs;
   ConnectivityTestHandler eventHandler;
   Session session(sessionOptions, sessionConfigs, &eventHandler);
@@ -290,14 +289,14 @@ int main(int argc, char** argv) {
   // 选项1: 使用默认的 ccapi WebSocket（boost.beast）
   // LTPTradingService tradingService(&session);
 
-  // 选项2: 使用 LTP 适配器替代 WebSocket（推荐用于低延迟场景）
+  // 选项2: 使用 LTP 适配器替代 WebSocket
   // 参数说明：
   //   - useLTPAdapter: true 表示使用 LTP 适配器，false 表示使用默认 WebSocket
   //   - orderPubTopic: LTP 订单发布主题（发送订单请求），默认 "bf0_order_sub"
   //   - orderSubTopic: LTP 订单订阅主题（接收订单响应），默认 "bf0_order_pub"
   bool useLTPAdapter = true;  // 设置为 true 启用 LTP 适配器
-  std::string orderPubTopic = "bf0_order_sub";  // 根据您的实际配置修改
-  std::string orderSubTopic = "bf0_order_pub";  // 根据您的实际配置修改
+  std::string orderPubTopic = "bf0_order_sub";
+  std::string orderSubTopic = "bf0_order_pub";
 
   LTPTradingService tradingService(&session, useLTPAdapter, orderPubTopic, orderSubTopic);
 
@@ -356,7 +355,7 @@ int main(int argc, char** argv) {
       // 等待下单响应
       std::this_thread::sleep_for(std::chrono::seconds(3));
 
-      // 撤单测试
+      // 撤单
       if (!eventHandler.lastOrderId.empty()) {
         std::cout << "\n[步骤2] 发送撤单请求..." << std::endl;
         std::cout << "撤销订单ID: " << eventHandler.lastOrderId << std::endl;
@@ -638,7 +637,7 @@ int main(int argc, char** argv) {
 
       LTPCreateOrderRequest request;
       request.exchange = LTPExchange::OKX;
-      request.symbol = "USDC-USDT-SWAP";  // USDC永续合约
+      request.symbol = "USDC-USDT-SWAP";
       request.side = LTPOrderSide::BUY;
       request.type = LTPOrderType::LIMIT;
       request.quantity = "1";  // 合约张数
@@ -944,7 +943,7 @@ int main(int argc, char** argv) {
       std::cout << "（订单状态将通过EventHandler的 SUBSCRIPTION_DATA 事件推送）" << std::endl;
       std::this_thread::sleep_for(std::chrono::seconds(3));
 
-      // 步骤4: 查询订单状态（确认订单详情）
+      // 步骤4: 查询订单
       if (!eventHandler.lastOrderId.empty()) {
         std::cout << "\n[步骤4] 查询订单状态（确认订单详情）..." << std::endl;
         LTPGetOrderRequest getRequest;
@@ -1095,16 +1094,13 @@ int main(int argc, char** argv) {
   }
 
   // ====================================================================
-  // 测试9: HTTP连接池 - 简化配置示例
+  // 测试9: HTTP连接池
   // ====================================================================
   if (1)
   {
-    std::cout << "\n测试9: HTTP连接池 - 简化配置示例" << std::endl;
+    std::cout << "\n测试9: HTTP连接池" << std::endl;
     std::cout << "========================================" << std::endl;
 
-    std::cout << "\n本测试展示如何用最少的配置启用HTTP连接池的所有功能\n" << std::endl;
-
-    // ========== 最简配置：只需2行代码 ==========
     SessionOptions poolSessionOptions;
 
     // 1. 启用多IP连接池
@@ -1117,13 +1113,6 @@ int main(int argc, char** argv) {
       "10.18.12.154",
       "10.18.17.213"
     };
-
-    // ========== 就这么简单！以下功能会自动启用 ==========
-    // ✅ 连接池大小 = IP数量 (4个)
-    // ✅ 主动保活 (每30秒)
-    // ✅ 自动重连 (最多3次)
-    // ✅ 长连接复用
-    // ✅ 连接保持5分钟
 
     std::cout << "✅ 配置完成！以下功能已自动启用:" << std::endl;
     std::cout << "   - 连接池大小: " << poolSessionOptions.httpConnectionPoolMaxSize << std::endl;
@@ -1258,7 +1247,6 @@ int main(int argc, char** argv) {
   std::cout << "   - 异步操作（createOrderAsync/cancelOrderAsync）返回void" << std::endl;
   std::cout << "   - 异步操作的结果通过EventHandler回调接收" << std::endl;
 
-  // 正确关闭Session
   std::cout << "\n正在关闭连接..." << std::endl;
   session.stop();
   std::this_thread::sleep_for(std::chrono::seconds(2));
