@@ -108,6 +108,36 @@ class LTPTradingService {
     return defaultCaps;
   }
 
+  void initializeWebSocketConnectionPool(LTPExchange exchange,
+                                         const std::map<std::string, std::string>& credential) {
+    std::string exchangeStr = ltp::exchangeToString(exchange);
+
+    // 如果交易所不支持websocket，则直接退出
+    auto it = exchangeCapabilities_.find(exchangeStr);
+    if (it == exchangeCapabilities_.end() || !it->second.supportsWebsocket) {
+      std::cout << "[LTPTradingService] Exchange " << exchangeStr
+                << " does not support WebSocket, skipping initialization" << std::endl;
+      return;
+    }
+
+    // 检查是否已经初始化
+    auto wsIt = websocketSubscriptionCorrelationIds_.find(exchangeStr);
+    if (wsIt != websocketSubscriptionCorrelationIds_.end()) {
+      std::cout << "[LTPTradingService] WebSocket connection pool for " << exchangeStr
+                << " already initialized" << std::endl;
+      return;
+    }
+
+    std::cout << "[LTPTradingService] Initializing WebSocket connection pool for "
+              << exchangeStr << "..." << std::endl;
+
+    ensureWebsocketSubscription(exchangeStr, credential);
+
+    std::cout << "[LTPTradingService] WebSocket connection pool for " << exchangeStr
+              << " initialized successfully" << std::endl;
+  }
+
+
   // ====================================================================
   // 同步接口 - 使用REST协议，通过Queue<Event>接收响应
   // ====================================================================
@@ -201,7 +231,7 @@ class LTPTradingService {
   // ====================================================================
 
   /**
-   * 创建订单（异步）
+   * 创建订单
    * 根据交易所能力配置，按优先级选择协议：FIX > WebSocket > REST
    * @param request 统一的创建订单请求
    * @param credential 认证信息
@@ -215,20 +245,17 @@ class LTPTradingService {
 
     auto it = exchangeCapabilities_.find(exchange);
     if (it != exchangeCapabilities_.end()) {
-      // 优先级1: FIX快速路径（最低延迟）
       if (it->second.supportsFix) {
         createOrderAsyncFixFastPath(request, credential, correlationId, exchange, apiCallStartTime);
         return;
       }
 
-      // 优先级2: WebSocket快速路径
       if (it->second.supportsWebsocket) {
         createOrderAsyncWebSocketFastPath(request, credential, correlationId, exchange, apiCallStartTime);
         return;
       }
     }
 
-    // 降级到标准路径（REST或首次连接）
     Request ccapiRequest = convertToCreateOrderRequest(request, credential);
     if (!correlationId.empty()) {
       ccapiRequest.setCorrelationId(correlationId);
@@ -740,11 +767,11 @@ class LTPTradingService {
  private:
   Session* session_;
   std::map<std::string, ExchangeCapabilities> exchangeCapabilities_;
-  std::map<std::string, std::string> websocketSubscriptionCorrelationIds_;  // 交易所 -> WebSocket订阅correlationId
-  std::map<std::string, std::string> fixSubscriptionCorrelationIds_;        // 交易所 -> FIX订阅correlationId
+  std::map<std::string, std::string> websocketSubscriptionCorrelationIds_;
+  std::map<std::string, std::string> fixSubscriptionCorrelationIds_;
   bool enableLatencyStats_;  // 是否启用延迟统计
-  bool useLTPAdapter_;  // 是否使用LTP适配器
-  std::unique_ptr<ccapi::LTPWebSocketAdapter> ltpAdapter_;  // LTP WebSocket适配器
+  bool useLTPAdapter_;
+  std::unique_ptr<ccapi::LTPWebSocketAdapter> ltpAdapter_;
 
   inline void createOrderAsyncFixFastPath(const LTPCreateOrderRequest& request,
                                          const std::map<std::string, std::string>& credential,
@@ -753,7 +780,6 @@ class LTPTradingService {
                                          const std::chrono::steady_clock::time_point& apiCallStartTime) {
     auto fixIt = fixSubscriptionCorrelationIds_.find(exchange);
     if (fixIt == fixSubscriptionCorrelationIds_.end()) {
-      // 首次调用，需要建立FIX连接（降级到标准路径）
       Request ccapiRequest = convertToCreateOrderRequest(request, credential);
       if (!correlationId.empty()) {
         ccapiRequest.setCorrelationId(correlationId);
@@ -856,7 +882,7 @@ class LTPTradingService {
     // 获取WebSocket correlationId
     auto wsIt = websocketSubscriptionCorrelationIds_.find(exchange);
     if (wsIt == websocketSubscriptionCorrelationIds_.end()) {
-      // 首次调用，需要建立连接（降级到标准路径）
+      // 首次调用，需要建立连接
       Request ccapiRequest = convertToCreateOrderRequest(request, credential);
       if (!correlationId.empty()) {
         ccapiRequest.setCorrelationId(correlationId);
@@ -1121,14 +1147,12 @@ class LTPTradingService {
       caps.supportsRest = true;
     }
 
-    // 优先级1: FIX协议
     if (caps.supportsFix) {
       std::string correlationId = ensureFixSubscription(exchange, credential);
       session_->sendRequestByFix(correlationId, request);
       return;
     }
 
-    // 优先级2: WebSocket协议
     // WebSocket请求不需要在Request中携带credential，因为credential已经在Subscription中提供
     if (caps.supportsWebsocket) {
       std::string correlationId = ensureWebsocketSubscription(exchange, credential);
@@ -1137,7 +1161,6 @@ class LTPTradingService {
       Request wsRequest = request;
       wsRequest.setCredential({});
 
-      // 记录实际发送时间并计算延迟（仅在启用延迟统计时）
       if (enableLatencyStats_ && apiCallStartTime.time_since_epoch().count() > 0) {
         auto sendTime = std::chrono::steady_clock::now();
         auto latencyNs = std::chrono::duration_cast<std::chrono::nanoseconds>(sendTime - apiCallStartTime).count();
@@ -1149,7 +1172,6 @@ class LTPTradingService {
       return;
     }
 
-    // 优先级3: REST协议（默认）
     session_->sendRequest(request);
   }
 
@@ -1294,9 +1316,6 @@ class LTPTradingService {
     return subCredential;
   }
 
-  /**
-   * 转换创建订单请求
-   */
   Request convertToCreateOrderRequest(const LTPCreateOrderRequest& request,
                                       const std::map<std::string, std::string>& credential) {
     std::string exchange = ltp::exchangeToString(request.exchange);

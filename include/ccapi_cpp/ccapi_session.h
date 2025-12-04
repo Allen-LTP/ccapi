@@ -608,7 +608,6 @@ class Session {
       for (const auto& y : x.second) {
         auto exchange = y.first;
         CCAPI_LOGGER_INFO("enabled service: " + serviceName + ", exchange: " + exchange);
-        // 初始化HTTP连接池(如果启用)
         y.second->startHttpConnectionPoolIfEnabled();
       }
     }
@@ -698,6 +697,7 @@ class Session {
         subscription.setInstrumentType(instrumentType);
       }
     }
+
     std::map<std::string, std::vector<Subscription>> subscriptionListByServiceNameMap;
     for (const auto& subscription : subscriptionList) {
       if (subscription.getField() == CCAPI_HEARTBEAT) {
@@ -706,6 +706,7 @@ class Session {
       auto serviceName = subscription.getServiceName();
       subscriptionListByServiceNameMap[serviceName].push_back(subscription);
     }
+
     for (const auto& x : subscriptionListByServiceNameMap) {
       auto serviceName = x.first;
       auto subscriptionList = x.second;

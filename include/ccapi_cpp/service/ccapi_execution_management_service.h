@@ -64,15 +64,66 @@ class ExecutionManagementService : public Service {
           const auto& proxyUrl = subscription.getProxyUrl();
 
           if (fieldSet.find(CCAPI_EM_WEBSOCKET_ORDER_ENTRY) != fieldSet.end()) {
-            auto wsConnectionPtr = std::make_shared<WsConnection>(that->baseUrlWsOrderEntry, "", std::vector<Subscription>{subscription}, credential, proxyUrl);
-            that->setWsConnectionStream(wsConnectionPtr);
-            CCAPI_LOGGER_WARN("about to subscribe with new wsConnectionPtr " + toString(*wsConnectionPtr));
-            that->prepareConnect(wsConnectionPtr);
+            std::string url = that->baseUrlWsOrderEntry;
+
+            if (that->sessionOptions.enableWebsocketConnectionPoolMultiIP &&
+                !that->sessionOptions.websocketConnectionPoolBindIPs.empty()) {
+
+              if (that->wsConnectionPoolByUrlMap.find(url) == that->wsConnectionPoolByUrlMap.end() ||
+                  that->wsConnectionPoolByUrlMap[url].empty()) {
+                CCAPI_LOGGER_INFO("Initializing WebSocket connection pool for order entry");
+                that->initializeWebsocketConnectionPool(url, "", std::vector<Subscription>{subscription}, credential);
+              }
+
+              auto wsConnectionPtr = that->selectWebsocketConnectionFromPool(url);
+              if (wsConnectionPtr) {
+                CCAPI_LOGGER_INFO("Using connection from pool: " + wsConnectionPtr->id + ", local IP: " + wsConnectionPtr->localIpAddress);
+
+                wsConnectionPtr->subscriptionList.push_back(subscription);
+                that->incrementWebsocketSubscriptionCount(wsConnectionPtr->id, subscription.getCorrelationId());
+              } else {
+                CCAPI_LOGGER_WARN("No available connection in pool, creating new connection");
+
+                auto wsConnectionPtr = std::make_shared<WsConnection>(url, "", std::vector<Subscription>{subscription}, credential, proxyUrl);
+                that->setWsConnectionStream(wsConnectionPtr);
+                that->prepareConnect(wsConnectionPtr);
+              }
+            } else {
+              auto wsConnectionPtr = std::make_shared<WsConnection>(url, "", std::vector<Subscription>{subscription}, credential, proxyUrl);
+              that->setWsConnectionStream(wsConnectionPtr);
+              CCAPI_LOGGER_WARN("about to subscribe with new wsConnectionPtr " + toString(*wsConnectionPtr));
+              that->prepareConnect(wsConnectionPtr);
+            }
           } else {
-            auto wsConnectionPtr = std::make_shared<WsConnection>(that->baseUrlWs, "", std::vector<Subscription>{subscription}, credential, proxyUrl);
-            that->setWsConnectionStream(wsConnectionPtr);
-            CCAPI_LOGGER_WARN("about to subscribe with new wsConnectionPtr " + toString(*wsConnectionPtr));
-            that->prepareConnect(wsConnectionPtr);
+            std::string url = that->baseUrlWs;
+
+            if (that->sessionOptions.enableWebsocketConnectionPoolMultiIP &&
+                !that->sessionOptions.websocketConnectionPoolBindIPs.empty()) {
+
+              if (that->wsConnectionPoolByUrlMap.find(url) == that->wsConnectionPoolByUrlMap.end() ||
+                  that->wsConnectionPoolByUrlMap[url].empty()) {
+                CCAPI_LOGGER_INFO("Initializing WebSocket connection pool");
+                that->initializeWebsocketConnectionPool(url, "", std::vector<Subscription>{subscription}, credential);
+              }
+
+              auto wsConnectionPtr = that->selectWebsocketConnectionFromPool(url);
+              if (wsConnectionPtr) {
+                CCAPI_LOGGER_INFO("Using connection from pool: " + wsConnectionPtr->id +
+                                 ", local IP: " + wsConnectionPtr->localIpAddress);
+                wsConnectionPtr->subscriptionList.push_back(subscription);
+                that->incrementWebsocketSubscriptionCount(wsConnectionPtr->id, subscription.getCorrelationId());
+              } else {
+                CCAPI_LOGGER_WARN("No available connection in pool, creating new connection");
+                auto wsConnectionPtr = std::make_shared<WsConnection>(url, "", std::vector<Subscription>{subscription}, credential, proxyUrl);
+                that->setWsConnectionStream(wsConnectionPtr);
+                that->prepareConnect(wsConnectionPtr);
+              }
+            } else {
+              auto wsConnectionPtr = std::make_shared<WsConnection>(url, "", std::vector<Subscription>{subscription}, credential, proxyUrl);
+              that->setWsConnectionStream(wsConnectionPtr);
+              CCAPI_LOGGER_WARN("about to subscribe with new wsConnectionPtr " + toString(*wsConnectionPtr));
+              that->prepareConnect(wsConnectionPtr);
+            }
           }
         });
       }
@@ -219,6 +270,12 @@ class ExecutionManagementService : public Service {
   }
 
   void onTextMessage(std::shared_ptr<WsConnection> wsConnectionPtr, boost::beast::string_view textMessageView, const TimePoint& timeReceived) override {
+    CCAPI_LOGGER_INFO("📥 [WebSocket] Received response via connection:");
+    CCAPI_LOGGER_INFO("   - Connection ID: " + wsConnectionPtr->id);
+    CCAPI_LOGGER_INFO("   - Local IP: " + wsConnectionPtr->localIpAddress);
+    CCAPI_LOGGER_INFO("   - URL: " + wsConnectionPtr->url);
+    CCAPI_LOGGER_INFO("   - Message preview: " + std::string(textMessageView).substr(0, std::min(size_t(100), textMessageView.size())) + "...");
+
     auto subscription = wsConnectionPtr->subscriptionList.at(0);
     this->onTextMessage(wsConnectionPtr, subscription, textMessageView, timeReceived);
     this->onPongByMethod(PingPongMethod::WEBSOCKET_APPLICATION_LEVEL, wsConnectionPtr, timeReceived, false);
@@ -297,14 +354,45 @@ class ExecutionManagementService : public Service {
                         CCAPI_LOGGER_DEBUG("request = " + toString(request));
                         CCAPI_LOGGER_TRACE("now = " + toString(now));
                         request.setTimeSent(now);
-                        auto it = that->wsConnectionPtrByCorrelationIdMap.find(websocketOrderEntrySubscriptionCorrelationId);
-                        if (it == that->wsConnectionPtrByCorrelationIdMap.end()) {
-                          that->onError(Event::Type::REQUEST_STATUS, Message::Type::REQUEST_FAILURE, "Websocket connection was not found",
-                                        {websocketOrderEntrySubscriptionCorrelationId});
-                          return;
-                        }
 
-                        auto wsConnectionPtr = it->second;
+                        std::shared_ptr<WsConnection> wsConnectionPtr = nullptr;
+
+                        if (that->sessionOptions.enableWebsocketConnectionPoolMultiIP &&
+                            !that->sessionOptions.websocketConnectionPoolBindIPs.empty()) {
+
+                          auto it = that->wsConnectionPtrByCorrelationIdMap.find(websocketOrderEntrySubscriptionCorrelationId);
+                          if (it != that->wsConnectionPtrByCorrelationIdMap.end()) {
+                            std::string url = it->second->url;
+
+                            wsConnectionPtr = that->selectWebsocketConnectionFromPool(url);
+                            if (wsConnectionPtr) {
+                              CCAPI_LOGGER_INFO("[WebSocket Pool] Sending request via connection:");
+                              CCAPI_LOGGER_INFO("   - Connection ID: " + wsConnectionPtr->id);
+                              CCAPI_LOGGER_INFO("   - Local IP: " + wsConnectionPtr->localIpAddress);
+                              CCAPI_LOGGER_INFO("   - URL: " + wsConnectionPtr->url);
+                              CCAPI_LOGGER_INFO("   - Request Correlation ID: " + request.getCorrelationId());
+                            } else {
+                              CCAPI_LOGGER_WARN("No available connection in pool, falling back to original connection");
+                              wsConnectionPtr = it->second;
+                            }
+                          } else {
+                            that->onError(Event::Type::REQUEST_STATUS, Message::Type::REQUEST_FAILURE,
+                                        "Websocket connection was not found", {websocketOrderEntrySubscriptionCorrelationId});
+                            return;
+                          }
+                        } else {
+                          auto it = that->wsConnectionPtrByCorrelationIdMap.find(websocketOrderEntrySubscriptionCorrelationId);
+                          if (it == that->wsConnectionPtrByCorrelationIdMap.end()) {
+                            that->onError(Event::Type::REQUEST_STATUS, Message::Type::REQUEST_FAILURE,
+                                        "Websocket connection was not found", {websocketOrderEntrySubscriptionCorrelationId});
+                            return;
+                          }
+                          wsConnectionPtr = it->second;
+                          CCAPI_LOGGER_INFO("[WebSocket] Sending request via connection:");
+                          CCAPI_LOGGER_INFO("   - Connection ID: " + wsConnectionPtr->id);
+                          CCAPI_LOGGER_INFO("   - URL: " + wsConnectionPtr->url);
+                          CCAPI_LOGGER_INFO("   - Request Correlation ID: " + request.getCorrelationId());
+                        }
 
                         CCAPI_LOGGER_TRACE("wsConnection = " + toString(*wsConnectionPtr));
                         const auto& instrument = request.getInstrument();

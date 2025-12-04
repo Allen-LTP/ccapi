@@ -3,9 +3,51 @@
 #include "ccapi_cpp/ccapi_ltp_trading_service.h"
 #include <iostream>
 #include <chrono>
+#include <fstream>
+#include <mutex>
 
 using namespace ccapi;
 using namespace ltp;
+
+class FileLogger : public ccapi::Logger {
+ public:
+  FileLogger(const std::string& logFilePath) {
+    logFile.open(logFilePath, std::ios::out | std::ios::app);
+    if (!logFile.is_open()) {
+      std::cerr << "无法打开日志文件: " << logFilePath << std::endl;
+    } else {
+      std::cout << "日志文件已打开: " << logFilePath << std::endl;
+    }
+  }
+
+  ~FileLogger() {
+    if (logFile.is_open()) {
+      logFile.close();
+    }
+  }
+
+  void logMessage(const std::string& severity, const std::string& threadId,
+                 const std::string& timeISO, const std::string& fileName,
+                 const std::string& lineNumber, const std::string& message) override {
+    std::lock_guard<std::mutex> lock(logMutex);
+
+    if (logFile.is_open()) {
+      logFile << timeISO << " [" << severity << "] [" << threadId << "] "
+              << fileName << ":" << lineNumber << " " << message << std::endl;
+      logFile.flush();
+    }
+
+    if (severity == "INFO" || severity == "WARN" || severity == "ERROR" || severity == "FATAL") {
+      std::cout << timeISO << " [" << severity << "] " << message << std::endl;
+    }
+  }
+
+ private:
+  std::ofstream logFile;
+  std::mutex logMutex;
+};
+
+Logger* Logger::logger = nullptr;
 
 class ConnectivityTestHandler : public EventHandler {
  public:
@@ -13,14 +55,13 @@ class ConnectivityTestHandler : public EventHandler {
     auto now = std::chrono::system_clock::now();
     auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
 
-    // 转换为统一响应
     LTPResponse response = LTPTradingService::convertEventToResponse(event);
 
     std::cout << "\n[" << timestamp << "] ========== 收到事件 ==========" << std::endl;
     std::cout << "事件类型: " << response.eventTypeString << std::endl;
     std::cout << "消息类型: " << response.messageTypeString << std::endl;
 
-    // 打印原始事件（用于调试）
+    // 打印原始事件
     if (response.eventType == LTPEventType::SUBSCRIPTION_DATA ||
         response.eventType == LTPEventType::RESPONSE) {
       std::cout << "\n📋 原始事件内容:" << std::endl;
@@ -272,13 +313,15 @@ class ConnectivityTestHandler : public EventHandler {
 };
 
 int main(int argc, char** argv) {
-  std::cout << "启用ccapi调试日志..." << std::endl;
+  std::string logFilePath = "ccapi_trading.log";
+  FileLogger* fileLogger = new FileLogger(logFilePath);
+  ccapi::Logger::logger = fileLogger;
 
   std::cout << "\n========================================" << std::endl;
   std::cout << "统一交易接口连通性测试" << std::endl;
-  std::cout << "========================================\n" << std::endl;
+  std::cout << "========================================" << std::endl;
 
-  // 1. 创建Session（启用日志）
+  // 1. 创建Session
   SessionOptions sessionOptions;
   sessionOptions.enableCheckPingPongWebsocketApplicationLevel = false;
   SessionConfigs sessionConfigs;
@@ -1096,7 +1139,7 @@ int main(int argc, char** argv) {
   // ====================================================================
   // 测试9: HTTP连接池
   // ====================================================================
-  if (1)
+  if (0)
   {
     std::cout << "\n测试9: HTTP连接池" << std::endl;
     std::cout << "========================================" << std::endl;
@@ -1108,10 +1151,10 @@ int main(int argc, char** argv) {
 
     // 2. 配置IP列表
     poolSessionOptions.httpConnectionPoolBindIPs = {
-      "10.18.20.16",
-      "10.18.80.199",
-      "10.18.12.154",
-      "10.18.17.213"
+      "10.18.20.16",  // 13.115.130.31
+      "10.18.80.199", // 18.179.189.176
+      "10.18.12.154", // 54.64.178.154
+      "10.18.17.213"  // 54.92.3.180
     };
 
     std::cout << "✅ 配置完成！以下功能已自动启用:" << std::endl;
@@ -1122,33 +1165,17 @@ int main(int argc, char** argv) {
     std::cout << "   - 连接超时: " << poolSessionOptions.httpConnectionKeepAliveTimeoutSeconds << "秒" << std::endl;
     std::cout << "   - 长连接: " << (!poolSessionOptions.enableOneHttpConnectionPerRequest ? "是" : "否") << std::endl;
 
-    // ========== 可选：自定义配置 ==========
-    // 如果需要修改默认值，可以在启用多IP后手动设置
-    // 例如：使用GET方法进行保活（币安统一账户推荐）
     poolSessionOptions.httpConnectionPoolKeepAliveMethod = "GET";
     poolSessionOptions.httpConnectionPoolKeepAlivePath = "/papi/v1/ping";
-
-    std::cout << "\n✅ 自定义配置:" << std::endl;
-    std::cout << "   - 保活方法: " << poolSessionOptions.httpConnectionPoolKeepAliveMethod << std::endl;
-    std::cout << "   - 保活路径: " << poolSessionOptions.httpConnectionPoolKeepAlivePath << std::endl;
 
     SessionConfigs poolSessionConfigs;
     ConnectivityTestHandler poolEventHandler;
     Session poolSession(poolSessionOptions, poolSessionConfigs, &poolEventHandler);
 
-    std::cout << "\n✅ Session创建完成，连接池已自动初始化！" << std::endl;
-    std::cout << "\n💡 提示:" << std::endl;
-    std::cout << "   - 无需手动调用任何初始化方法" << std::endl;
-    std::cout << "   - 无需手动启动保活定时器" << std::endl;
-    std::cout << "   - 无需手动处理重连逻辑" << std::endl;
-    std::cout << "   - 一切都是自动的！\n" << std::endl;
-
     const char* pmApiKey = std::getenv("BINANCE_PM_API_KEY");
     const char* pmApiSecret = std::getenv("BINANCE_PM_API_SECRET");
 
     if (pmApiKey && pmApiSecret) {
-      std::cout << "执行测试请求以验证连接池..." << std::endl;
-
       std::map<std::string, std::string> poolCredential;
       poolCredential[CCAPI_BINANCE_PORTFOLIO_MARGIN_API_KEY] = pmApiKey;
       poolCredential[CCAPI_BINANCE_PORTFOLIO_MARGIN_API_SECRET] = pmApiSecret;
@@ -1188,6 +1215,150 @@ int main(int argc, char** argv) {
     poolSession.stop();
     std::this_thread::sleep_for(std::chrono::seconds(2));
   }
+  // ====================================================================
+  // 测试10: WebSocket连接池
+  // ====================================================================
+  if (0)
+  {
+    std::cout << "\n测试10: WebSocket连接池 - 多IP下单" << std::endl;
+    std::cout << "========================================" << std::endl;
+
+    const char* futuresApiKey = std::getenv("BINANCE_FUTURES_API_KEY");
+    const char* futuresApiSecret = std::getenv("BINANCE_FUTURES_API_SECRET");
+
+    if (futuresApiKey && futuresApiSecret) {
+      std::cout << "API Key: " << std::string(futuresApiKey).substr(0, 8) << "..." << std::endl;
+      std::cout << "协议: WebSocket (使用连接池)" << std::endl;
+      std::cout << "交易对: USDCUSDT" << std::endl;
+
+      SessionOptions wsPoolOptions;
+
+      wsPoolOptions.enableWebsocketConnectionPoolMultiIP = true;
+
+      wsPoolOptions.websocketConnectionPoolBindIPs = {
+        "10.18.20.16",  // 13.115.130.31
+        "10.18.80.199", // 18.179.189.176
+        "10.18.12.154", // 54.64.178.154
+        "10.18.17.213"  // 54.92.3.180
+      };
+
+      // 负载均衡策略: "round_robin" 或 "least_subscriptions"
+      wsPoolOptions.websocketConnectionPoolLoadBalanceStrategy = "round_robin";
+
+      std::cout << "配置完成:" << std::endl;
+      std::cout << "  - 本地IP数量: " << wsPoolOptions.websocketConnectionPoolBindIPs.size() << std::endl;
+      std::cout << "  - 每IP连接数: " << wsPoolOptions.websocketConnectionsPerIP << std::endl;
+      std::cout << "  - 总连接数: " << (wsPoolOptions.websocketConnectionPoolBindIPs.size() * wsPoolOptions.websocketConnectionsPerIP) << std::endl;
+      std::cout << "  - 负载均衡策略: " << wsPoolOptions.websocketConnectionPoolLoadBalanceStrategy << std::endl;
+      std::cout << std::endl;
+
+      SessionConfigs wsPoolConfigs;
+      ConnectivityTestHandler wsPoolHandler;
+      Session wsPoolSession(wsPoolOptions, wsPoolConfigs, &wsPoolHandler);
+
+      LTPTradingService wsPoolTradingService(&wsPoolSession);
+
+      std::map<std::string, std::string> wsPoolCredential;
+      wsPoolCredential[CCAPI_BINANCE_USDS_FUTURES_API_KEY] = futuresApiKey;
+      wsPoolCredential[CCAPI_BINANCE_USDS_FUTURES_API_SECRET] = futuresApiSecret;
+
+      // 初始化ws连接池(大概需要3s时间)
+      // 即使这里不主动调用初始化,系统也会在第一次下单的时候主动创建连接池
+      wsPoolTradingService.initializeWebSocketConnectionPool(LTPExchange::BINANCE_USDS_FUTURES, wsPoolCredential);
+
+      std::cout << "发送多个下单请求测试连接池负载均衡\n" << std::endl;
+
+      std::vector<std::string> orderIds;
+
+      for (int i = 0; i < 4; i++) {
+        auto now = std::chrono::system_clock::now();
+        auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+
+        LTPCreateOrderRequest request;
+        request.exchange = LTPExchange::BINANCE_USDS_FUTURES;
+        request.symbol = "USDCUSDT";
+        request.side = LTPOrderSide::BUY;
+        request.type = LTPOrderType::LIMIT;
+        request.quantity = "10";
+        request.price = "0.9";
+        request.timeInForce = LTPTimeInForce::GTC;
+        request.clientOrderId = "ws_pool_" + std::to_string(timestamp) + "_" + std::to_string(i);
+
+        std::cout << "\n[订单 " << (i+1) << "/4] 客户端订单ID: " << request.clientOrderId << std::endl;
+        std::cout << "  - 此订单将通过连接池中的某个WebSocket连接发送" << std::endl;
+        std::cout << "  - 根据负载均衡策略自动选择连接" << std::endl;
+
+        wsPoolHandler.lastOrderId.clear();
+        wsPoolTradingService.createOrderAsync(request, wsPoolCredential, "ws-pool-order-" + std::to_string(i));
+
+        std::this_thread::sleep_for(std::chrono::seconds(3));
+
+        if (!wsPoolHandler.lastOrderId.empty()) {
+          orderIds.push_back(wsPoolHandler.lastOrderId);
+          std::cout << "  ✅ 订单已创建: " << wsPoolHandler.lastOrderId << std::endl;
+        } else {
+          std::cout << "  ⚠️  未获取到订单ID" << std::endl;
+        }
+      }
+
+      std::cout << "\n✅ 所有订单已发送!" << std::endl;
+      std::cout << "💡 观察日志可以看到:" << std::endl;
+      std::cout << "   - 多个WebSocket连接被建立" << std::endl;
+      std::cout << "   - 订单被分配到不同的连接" << std::endl;
+      std::cout << "   - 每个连接绑定到不同的本地IP\n" << std::endl;
+
+      if (!orderIds.empty()) {
+        std::cout << "撤销所有订单\n" << std::endl;
+
+        for (size_t i = 0; i < orderIds.size(); i++) {
+          std::cout << "\n[撤单 " << (i+1) << "/" << orderIds.size() << "] 订单ID: " << orderIds[i] << std::endl;
+
+          LTPCancelOrderRequest cancelRequest;
+          cancelRequest.exchange = LTPExchange::BINANCE_USDS_FUTURES;
+          cancelRequest.symbol = "USDCUSDT";
+          cancelRequest.orderId = orderIds[i];
+
+          wsPoolTradingService.cancelOrderAsync(cancelRequest, wsPoolCredential, "ws-pool-cancel-" + std::to_string(i));
+
+          std::this_thread::sleep_for(std::chrono::seconds(2));
+        }
+
+        std::cout << "\n✅ 所有订单已撤销!" << std::endl;
+      }
+
+      std::cout << "\n保持连接观察连接池状态\n" << std::endl;
+      std::cout << "等待10秒..." << std::endl;
+      std::this_thread::sleep_for(std::chrono::seconds(10));
+
+      std::cout << "\n========== WebSocket连接池测试完成 ==========\n" << std::endl;
+      std::cout << "关键要点总结:" << std::endl;
+      std::cout << "1. WebSocket连接池配置只需3行代码:" << std::endl;
+      std::cout << "   - enableWebsocketConnectionPoolMultiIP = true" << std::endl;
+      std::cout << "   - websocketConnectionPoolBindIPs = {IP列表}" << std::endl;
+      std::cout << "   - websocketConnectionsPerIP = 连接数" << std::endl;
+      std::cout << "\n2. 支持两种负载均衡策略:" << std::endl;
+      std::cout << "   - round_robin: 轮询分配,适合均匀负载" << std::endl;
+      std::cout << "   - least_subscriptions: 最少订阅优先,适合动态负载" << std::endl;
+      std::cout << "\n3. 连接池自动管理:" << std::endl;
+      std::cout << "   - 自动建立和维护多个WebSocket连接" << std::endl;
+      std::cout << "   - 自动分配订单到不同连接" << std::endl;
+      std::cout << "   - 自动处理连接失败和重连" << std::endl;
+      std::cout << "   - 每个连接绑定到不同的本地IP" << std::endl;
+      std::cout << "\n4. 使用场景:" << std::endl;
+      std::cout << "   - AWS EC2多网卡环境" << std::endl;
+      std::cout << "   - 需要分散WebSocket连接负载" << std::endl;
+      std::cout << "   - 需要提高系统可靠性和吞吐量" << std::endl;
+      std::cout << std::endl;
+
+      // 关闭Session
+      std::cout << "正在关闭WebSocket连接池Session..." << std::endl;
+      wsPoolSession.stop();
+      std::this_thread::sleep_for(std::chrono::seconds(2));
+    } else {
+      std::cout << "⚠️  跳过测试10: 未设置环境变量 BINANCE_FUTURES_API_KEY 和 BINANCE_FUTURES_API_SECRET\n" << std::endl;
+    }
+  }
+
 
   std::cout << "\n========================================" << std::endl;
   std::cout << "测试完成!" << std::endl;
@@ -1252,6 +1423,10 @@ int main(int argc, char** argv) {
   std::this_thread::sleep_for(std::chrono::seconds(2));
 
   std::cout << "程序正常退出\n" << std::endl;
+  std::cout << "📝 完整日志已保存到: " << logFilePath << std::endl;
+
+  delete fileLogger;
+  ccapi::Logger::logger = nullptr;
 
   return 0;
 }

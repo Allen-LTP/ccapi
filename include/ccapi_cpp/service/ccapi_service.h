@@ -860,8 +860,9 @@ class Service : public std::enable_shared_from_this<Service> {
           this->initializeHttpConnectionPoolWithUrl(requestBaseUrl);
         }
 
-        if (this->sessionOptions.enableOneHttpConnectionPerRequest || this->httpConnectionPool[localIpAddress][requestBaseUrl].empty() ||
-            std::chrono::duration_cast<std::chrono::seconds>(request.getTimeSent() -
+        if (this->sessionOptions.enableOneHttpConnectionPerRequest
+         || this->httpConnectionPool[localIpAddress][requestBaseUrl].empty()
+         || std::chrono::duration_cast<std::chrono::seconds>(request.getTimeSent() -
                                                              this->httpConnectionPool[localIpAddress][requestBaseUrl].back()->lastReceiveDataTp)
                     .count() >= this->sessionOptions.httpConnectionKeepAliveTimeoutSeconds) {
           this->httpConnectionPool[localIpAddress][requestBaseUrl].clear();
@@ -1054,6 +1055,30 @@ class Service : public std::enable_shared_from_this<Service> {
               this->onError(Event::Type::SUBSCRIPTION_STATUS, Message::Type::SUBSCRIPTION_FAILURE, ec, "set SNI Hostname", wsConnectionPtr->correlationIdList);
               return;
             }
+          }
+
+          const auto& localIpAddress = wsConnectionPtr->localIpAddress;
+          if (!localIpAddress.empty()) {
+            auto& socket = beast::get_lowest_layer(*streamPtr).socket();
+            if (!socket.is_open()) {
+              ErrorCode ec;
+              socket.open(net::ip::tcp::v4(), ec);
+              if (ec) {
+                CCAPI_LOGGER_ERROR("Failed to open socket for WebSocket: " + ec.message());
+                this->onError(Event::Type::SUBSCRIPTION_STATUS, Message::Type::SUBSCRIPTION_FAILURE, ec, "socket open", wsConnectionPtr->correlationIdList);
+                return;
+              }
+            }
+
+            ErrorCode ec;
+            tcp::endpoint localEndpoint(net::ip::make_address(localIpAddress), 0);
+            socket.bind(localEndpoint, ec);
+            if (ec) {
+              CCAPI_LOGGER_ERROR("Failed to bind WebSocket to local IP " + localIpAddress + ": " + ec.message());
+              this->onError(Event::Type::SUBSCRIPTION_STATUS, Message::Type::SUBSCRIPTION_FAILURE, ec, "socket bind", wsConnectionPtr->correlationIdList);
+              return;
+            }
+            CCAPI_LOGGER_INFO("WebSocket bound to local IP: " + localIpAddress);
           }
 
           CCAPI_LOGGER_TRACE("before async_connect");
@@ -1682,6 +1707,11 @@ class Service : public std::enable_shared_from_this<Service> {
 
   std::map<std::string, std::shared_ptr<WsConnection>> wsConnectionPtrByIdMap;
 
+  // WebSocket连接池相关
+  std::map<std::string, std::vector<std::shared_ptr<WsConnection>>> wsConnectionPoolByUrlMap;  // URL -> 连接池
+  std::map<std::string, size_t> wsConnectionPoolRoundRobinIndexMap;  // URL -> 轮询索引
+  std::map<std::string, std::map<std::string, int>> wsConnectionSubscriptionCountMap;  // connectionId -> {subscriptionId -> count}
+
   std::map<std::string, bool> wsConnectionPendingPingingByConnectionIdMap;
   std::map<std::string, bool> shouldProcessRemainingMessageOnClosingByConnectionIdMap;
   std::map<std::string, int> connectNumRetryOnFailByConnectionUrlMap;
@@ -1992,14 +2022,12 @@ class Service : public std::enable_shared_from_this<Service> {
       return;
     }
 
-    // 检查targetUrl是否有效
     if (targetUrl.empty()) {
       CCAPI_LOGGER_WARN("Target URL is empty, cannot initialize connection pool");
       CCAPI_LOGGER_WARN("Connection pool will be initialized on first request");
       return;
     }
 
-    // 检查是否已经初始化过
     if (this->httpConnectionPoolInitialized) {
       CCAPI_LOGGER_DEBUG("Connection pool already initialized");
       return;
@@ -2045,7 +2073,6 @@ class Service : public std::enable_shared_from_this<Service> {
     CCAPI_LOGGER_FUNCTION_EXIT;
   }
 
-  // 预连接专用的连接workaround方法实现
   void asyncConnectWorkaroundForPreConnect(std::shared_ptr<HttpConnection> httpConnectionPtr,
                                           const std::string& localIpAddress, const std::string& baseUrl,
                                           tcp::resolver::results_type results, size_t resultIndex) {
@@ -2153,6 +2180,178 @@ class Service : public std::enable_shared_from_this<Service> {
             that->startHttpConnectionPoolKeepAlive(localIpAddress, baseUrl);
           });
       });
+  }
+
+  void initializeWebsocketConnectionPool(const std::string& url, const std::string& group,
+                                         const std::vector<Subscription>& subscriptionList,
+                                         const std::map<std::string, std::string>& credential) {
+    CCAPI_LOGGER_FUNCTION_ENTER;
+
+    if (!this->sessionOptions.enableWebsocketConnectionPoolMultiIP ||
+        this->sessionOptions.websocketConnectionPoolBindIPs.empty()) {
+      CCAPI_LOGGER_DEBUG("WebSocket connection pool disabled or no bind IPs configured");
+      return;
+    }
+
+    const auto& bindIPs = this->sessionOptions.websocketConnectionPoolBindIPs;
+    int connectionsPerIP = this->sessionOptions.websocketConnectionsPerIP;
+
+    CCAPI_LOGGER_INFO("Initializing WebSocket connection pool:");
+    CCAPI_LOGGER_INFO("  - URL: " + url);
+    CCAPI_LOGGER_INFO("  - Total IPs: " + std::to_string(bindIPs.size()));
+    CCAPI_LOGGER_INFO("  - Connections per IP: " + std::to_string(connectionsPerIP));
+    CCAPI_LOGGER_INFO("  - Total connections: " + std::to_string(bindIPs.size() * connectionsPerIP));
+
+    auto& connectionPool = this->wsConnectionPoolByUrlMap[url];
+
+    for (const auto& localIP : bindIPs) {
+      for (int i = 0; i < connectionsPerIP; ++i) {
+        auto wsConnectionPtr = std::make_shared<WsConnection>(url, group, subscriptionList, credential, "", localIP);
+
+        CCAPI_LOGGER_INFO("Creating WebSocket connection " + std::to_string(i + 1) + "/" +
+                         std::to_string(connectionsPerIP) + " for IP: " + localIP);
+
+        this->setWsConnectionStream(wsConnectionPtr);
+        connectionPool.push_back(wsConnectionPtr);
+        this->wsConnectionSubscriptionCountMap[wsConnectionPtr->id] = {};
+        this->prepareConnect(wsConnectionPtr);
+      }
+    }
+
+    this->wsConnectionPoolRoundRobinIndexMap[url] = 0;
+    CCAPI_LOGGER_FUNCTION_EXIT;
+  }
+
+  std::shared_ptr<WsConnection> selectWebsocketConnectionFromPool(const std::string& url) {
+    CCAPI_LOGGER_FUNCTION_ENTER;
+
+    auto it = this->wsConnectionPoolByUrlMap.find(url);
+    if (it == this->wsConnectionPoolByUrlMap.end() || it->second.empty()) {
+      CCAPI_LOGGER_DEBUG("No connection pool found for URL: " + url);
+      return nullptr;
+    }
+
+    auto& connectionPool = it->second;
+    const auto& strategy = this->sessionOptions.websocketConnectionPoolLoadBalanceStrategy;
+
+    std::shared_ptr<WsConnection> selectedConnection = nullptr;
+
+    if (strategy == "round_robin") {
+      size_t& index = this->wsConnectionPoolRoundRobinIndexMap[url];
+
+      // 找到第一个OPEN状态的连接
+      size_t attempts = 0;
+      while (attempts < connectionPool.size()) {
+        auto& conn = connectionPool[index];
+        index = (index + 1) % connectionPool.size();
+
+        if (conn->status == WsConnection::Status::OPEN) {
+          selectedConnection = conn;
+          CCAPI_LOGGER_DEBUG("Selected connection (round-robin): " + conn->id + ", local IP: " + conn->localIpAddress);
+          break;
+        }
+        attempts++;
+      }
+    } else if (strategy == "least_subscriptions") {
+      int minSubscriptions = INT_MAX;
+
+      for (const auto& conn : connectionPool) {
+        if (conn->status == WsConnection::Status::OPEN) {
+          int subscriptionCount = 0;
+          auto countIt = this->wsConnectionSubscriptionCountMap.find(conn->id);
+          if (countIt != this->wsConnectionSubscriptionCountMap.end()) {
+            for (const auto& kv : countIt->second) {
+              subscriptionCount += kv.second;
+            }
+          }
+
+          if (subscriptionCount < minSubscriptions) {
+            minSubscriptions = subscriptionCount;
+            selectedConnection = conn;
+          }
+        }
+      }
+
+      if (selectedConnection) {
+        CCAPI_LOGGER_DEBUG("Selected connection (least-subscriptions): " + selectedConnection->id +
+                         ", local IP: " + selectedConnection->localIpAddress +
+                         ", subscriptions: " + std::to_string(minSubscriptions));
+      }
+    } else {
+      CCAPI_LOGGER_WARN("Unknown load balance strategy: " + strategy + ", falling back to round-robin");
+      size_t& index = this->wsConnectionPoolRoundRobinIndexMap[url];
+      if (index < connectionPool.size()) {
+        selectedConnection = connectionPool[index];
+        index = (index + 1) % connectionPool.size();
+      }
+    }
+
+    if (!selectedConnection) {
+      CCAPI_LOGGER_WARN("No available connection found in pool for URL: " + url);
+    }
+
+    CCAPI_LOGGER_FUNCTION_EXIT;
+    return selectedConnection;
+  }
+
+  void incrementWebsocketSubscriptionCount(const std::string& connectionId, const std::string& subscriptionId) {
+    this->wsConnectionSubscriptionCountMap[connectionId][subscriptionId]++;
+    CCAPI_LOGGER_TRACE("Incremented subscription count for connection " + connectionId +
+                      ", subscription " + subscriptionId);
+  }
+
+  void decrementWebsocketSubscriptionCount(const std::string& connectionId, const std::string& subscriptionId) {
+    auto connIt = this->wsConnectionSubscriptionCountMap.find(connectionId);
+    if (connIt != this->wsConnectionSubscriptionCountMap.end()) {
+      auto subIt = connIt->second.find(subscriptionId);
+      if (subIt != connIt->second.end()) {
+        subIt->second--;
+        if (subIt->second <= 0) {
+          connIt->second.erase(subIt);
+        }
+        CCAPI_LOGGER_TRACE("Decremented subscription count for connection " + connectionId +
+                          ", subscription " + subscriptionId);
+      }
+    }
+  }
+
+  std::string getWebsocketConnectionPoolStatus(const std::string& url) {
+    std::ostringstream oss;
+    oss << "WebSocket Connection Pool Status for URL: " + url << "\n";
+
+    auto it = this->wsConnectionPoolByUrlMap.find(url);
+    if (it == this->wsConnectionPoolByUrlMap.end()) {
+      oss << "  No connection pool found\n";
+      return oss.str();
+    }
+
+    const auto& connectionPool = it->second;
+    oss << "  Total connections: " << connectionPool.size() << "\n";
+
+    int openCount = 0;
+    for (size_t i = 0; i < connectionPool.size(); ++i) {
+      const auto& conn = connectionPool[i];
+      int subscriptionCount = 0;
+      auto countIt = this->wsConnectionSubscriptionCountMap.find(conn->id);
+      if (countIt != this->wsConnectionSubscriptionCountMap.end()) {
+        for (const auto& kv : countIt->second) {
+          subscriptionCount += kv.second;
+        }
+      }
+
+      oss << "  [" << i << "] ID: " << conn->id
+          << ", Local IP: " << conn->localIpAddress
+          << ", Status: " << WsConnection::statusToString(conn->status)
+          << ", Subscriptions: " << subscriptionCount << "\n";
+
+      if (conn->status == WsConnection::Status::OPEN) {
+        openCount++;
+      }
+    }
+
+    oss << "  Open connections: " << openCount << "/" << connectionPool.size() << "\n";
+
+    return oss.str();
   }
 };
 

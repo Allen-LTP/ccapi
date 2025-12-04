@@ -18,13 +18,13 @@ class WsConnection {
   WsConnection& operator=(const WsConnection&) = delete;
 
   WsConnection(const std::string& url, const std::string& group, const std::vector<Subscription>& subscriptionList,
-               const std::map<std::string, std::string>& credential, const std::string& proxyUrl = "")
-      : url(url), group(group), subscriptionList(subscriptionList), credential(credential), proxyUrl(proxyUrl) {
+               const std::map<std::string, std::string>& credential, const std::string& proxyUrl = "", const std::string& localIpAddress = "")
+      : url(url), group(group), subscriptionList(subscriptionList), credential(credential), proxyUrl(proxyUrl), localIpAddress(localIpAddress) {
     std::map<std::string, std::string> shortCredential;
     for (const auto& x : credential) {
       shortCredential.insert(std::make_pair(x.first, UtilString::firstNCharacter(x.second, CCAPI_CREDENTIAL_DISPLAY_LENGTH)));
     }
-    this->longId = this->url + "||" + this->group + "||" + ccapi::toString(this->subscriptionList) + "||" + ccapi::toString(shortCredential);
+    this->longId = this->url + "||" + this->group + "||" + ccapi::toString(this->subscriptionList) + "||" + ccapi::toString(shortCredential) + "||" + localIpAddress;
     this->id = UtilAlgorithm::shortBase62Hash(this->longId);
     this->correlationIdList.reserve(subscriptionList.size());
     std::transform(subscriptionList.cbegin(), subscriptionList.cend(), std::back_inserter(this->correlationIdList),
@@ -51,7 +51,7 @@ class WsConnection {
         streamPtr);
     std::string output = "WsConnection [longId = " + longId + ", id = " + id + ", url = " + url + ", group = " + group +
                          ", subscriptionList = " + ccapi::toString(subscriptionList) + ", credential = " + ccapi::toString(shortCredential) +
-                         ", proxyUrl = " + proxyUrl + ", status = " + statusToString(status) + ", headers = " + ccapi::toString(headers) +
+                         ", proxyUrl = " + proxyUrl + ", localIpAddress = " + localIpAddress + ", status = " + statusToString(status) + ", headers = " + ccapi::toString(headers) +
                          ", streamPtr = " + oss.str() + ", remoteCloseCode = " + std::to_string(remoteCloseCode) +
                          ", remoteCloseReason = " + std::string(remoteCloseReason.reason.c_str()) +
                          ", hostHttpHeaderValue = " + ccapi::toString(hostHttpHeaderValue) + ", path = " + ccapi::toString(path) +
@@ -147,6 +147,7 @@ class WsConnection {
   std::map<std::string, std::string> headers;
   std::map<std::string, std::string> credential;
   std::string proxyUrl;
+  std::string localIpAddress;  // 本地IP地址绑定，用于多IP连接池
   std::variant<std::shared_ptr<beast::websocket::stream<beast::ssl_stream<beast::tcp_stream>>>, std::shared_ptr<beast::websocket::stream<beast::tcp_stream>>>
       streamPtr;
   beast::websocket::close_code remoteCloseCode{};

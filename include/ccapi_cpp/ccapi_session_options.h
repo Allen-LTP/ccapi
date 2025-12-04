@@ -102,6 +102,12 @@ class SessionOptions {
   int httpConnectionPoolReconnectMaxRetries{3};  // 最大重连尝试次数
   long httpConnectionPoolReconnectDelayMilliseconds{1000};  // 重连延迟（毫秒），每次重连前等待时间
 
+  // WebSocket连接池多IP支持
+  bool enableWebsocketConnectionPoolMultiIP{false};  // 启用WebSocket多IP连接池，每个连接绑定不同的本地IP
+  std::vector<std::string> websocketConnectionPoolBindIPs;  // WebSocket连接池绑定的本地IP列表
+  int websocketConnectionsPerIP{1};  // 每个IP建立的WebSocket连接数，默认1个
+  std::string websocketConnectionPoolLoadBalanceStrategy{"round_robin"};  // 负载均衡策略: "round_robin"(轮询), "least_subscriptions"(最少订阅)
+
   long websocketConnectTimeoutMilliseconds{10000};
   long fixConnectTimeoutMilliseconds{10000};
 };
